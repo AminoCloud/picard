@@ -1,0 +1,95 @@
+name: AC Build & Push
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.ac/manifest*.yaml'
+      - 'Dockerfile'
+
+permissions:
+  contents: read
+
+jobs:
+  build-push-notify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Read the primary manifest for the Docker image tag
+      - name: Parse primary manifest
+        id: meta
+        run: |
+          python3 - << 'PYEOF'
+          import yaml, os
+          d = yaml.safe_load(open('.ac/manifest.yaml'))
+          out = open(os.environ['GITHUB_OUTPUT'], 'a')
+          out.write(f"name={d['metadata']['name']}\n")
+          out.write(f"version={d['metadata']['version']}\n")
+          out.write(f"image={d['docker']['image']}\n")
+          PYEOF
+
+      - name: Log in to ACR
+        uses: docker/login-action@v3
+        with:
+          registry: acr.aminocloud.io
+          username: ${{ secrets.ACR_CLIENT_ID }}
+          password: ${{ secrets.ACR_CLIENT_SECRET }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}
+            ${{ steps.meta.outputs.image }}:latest
+
+      # Call the AminoCloud webhook for every manifest in .ac/
+      # (SAMtools has two: manifest.yaml + manifest-index.yaml)
+      - name: Notify AminoCloud operator webhook
+        env:
+          OPERATOR_WEBHOOK_SECRET: ${{ secrets.OPERATOR_WEBHOOK_SECRET }}
+          AC_API_BASE: ${{ secrets.AC_API_BASE }}
+          REPO: ${{ github.repository }}
+        run: |
+          python3 - << 'PYEOF'
+          import yaml, json, glob, hmac, hashlib, subprocess, os, sys
+
+          secret  = os.environ['OPERATOR_WEBHOOK_SECRET'].encode()
+          api_base = os.environ['AC_API_BASE'].rstrip('/')
+          repo_url = f"https://github.com/{os.environ['REPO']}"
+
+          for manifest_path in sorted(glob.glob('.ac/manifest*.yaml')):
+              d    = yaml.safe_load(open(manifest_path))
+              meta = d.get('metadata', {})
+
+              payload = json.dumps({
+                  'operator_name': meta['name'],
+                  'version':       meta['version'],
+                  'docker_image':  f"{d['docker']['image']}:{meta['version']}",
+                  'repo_url':      repo_url,
+                  'manifest':      meta,
+                  'inputs':        d.get('inputs',  []),
+                  'outputs':       d.get('outputs', []),
+                  'compute':       d.get('compute', {}),
+              }, separators=(',', ':'))
+
+              sig = 'sha256=' + hmac.new(
+                  secret, payload.encode(), hashlib.sha256
+              ).hexdigest()
+
+              result = subprocess.run(
+                  ['curl', '-fsSL', '-X', 'POST',
+                   f'{api_base}/v2/api/genomics/pipelines/operators/webhook',
+                   '-H', f'X-Hub-Signature-256: {sig}',
+                   '-H', 'Content-Type: application/json',
+                   '-d', payload],
+                  capture_output=True, text=True,
+              )
+              print(f"[{meta['name']}] {result.stdout[:300]}")
+              if result.returncode != 0:
+                  print(f"[{meta['name']}] FAILED: {result.stderr}", file=sys.stderr)
+                  sys.exit(1)
+          PYEOF
