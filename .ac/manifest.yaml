@@ -1,0 +1,30 @@
+apiVersion: aminocloud.io/v1
+kind: PipelineOperator
+metadata:
+  name: Picard MarkDuplicates
+  description: "Identifies and marks duplicate reads in a BAM file. Essential for reducing PCR amplification bias in variant calling."
+  version: "3.1.1"
+  author: Broad Institute
+  category: post_alignment
+  instrumentModes: [illumina, ion_torrent]
+  tags: [duplicates, picard, dedup]
+inputs:
+  - id: bam_in
+    name: Sorted BAM
+    dataType: BAM
+    required: true
+outputs:
+  - id: bam_out
+    name: Deduped BAM
+    dataType: BAM
+  - id: report_out
+    name: Metrics Report
+    dataType: REPORT
+compute:
+  cpu: 4
+  memoryGb: 16
+  gpuRequired: false
+  estimatedMinutes: 30
+docker:
+  image: acr.aminocloud.io/aminocloud/picard
+  tag: "3.1.1"
